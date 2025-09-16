@@ -62,20 +62,34 @@ def save_history(res):
 # -----------------------------
 # API FUNCTION (AssemblyAI + Gemini)
 # -----------------------------
-def api(file_path: str):
-    # 1️⃣ Upload audio to AssemblyAI
-    headers = {"authorization": ASSEMBLY_API_KEY}
+# -----------------------------
+# API FUNCTION (AssemblyAI + Gemini) - GridFS compatible
+# -----------------------------
+def api(file_ref):
+    """
+    file_ref: str (local path) ya dict (MongoDB GridFS)
+    """
+    # 1️⃣ Read audio bytes
+    if isinstance(file_ref, dict):
+        # GridFS se audio read karo
+        file_id = ObjectId(file_ref["file_id"])
+        audio_bytes = fs.get(file_id).read()
+    else:
+        # Local file path
+        with open(file_ref, "rb") as f:
+            audio_bytes = f.read()
 
-    with open(file_path, "rb") as f:
-        upload_res = requests.post(
-            "https://api.assemblyai.com/v2/upload",
-            headers=headers,
-            data=f
-        )
+    # 2️⃣ Upload to AssemblyAI
+    headers = {"authorization": ASSEMBLY_API_KEY}
+    upload_res = requests.post(
+        "https://api.assemblyai.com/v2/upload",
+        headers=headers,
+        data=audio_bytes
+    )
     upload_res.raise_for_status()
     audio_url = upload_res.json()["upload_url"]
 
-    # 2️⃣ Start transcription
+    # 3️⃣ Start transcription
     transcript_req = {"audio_url": audio_url}
     transcript_res = requests.post(
         "https://api.assemblyai.com/v2/transcript",
@@ -85,7 +99,7 @@ def api(file_path: str):
     transcript_res.raise_for_status()
     transcript_id = transcript_res.json()["id"]
 
-    # 3️⃣ Poll for transcription result
+    # 4️⃣ Poll for transcription result
     transcript_text = None
     while True:
         poll_res = requests.get(
@@ -101,9 +115,8 @@ def api(file_path: str):
             return {"error": "Transcription failed", "details": poll_res.json()}
         time.sleep(3)
 
-    # 4️⃣ Send ONLY transcript text to Gemini
+    # 5️⃣ Send ONLY transcript text to Gemini
     model = genai.GenerativeModel(os.getenv("GEMINI_MODEL"))
-
     prompt = f"""
 You are an expert AI assistant specialized in analyzing meeting recordings, audio discussions, and video content. 
 Your job is to take an audio/video transcript and provide a structured, clear, and professional response in ENGLISH ONLY. 
@@ -161,6 +174,7 @@ TRANSCRIPT:
         )
     )
 
+    # 6️⃣ Save history
     return save_history(res)
 
 # -----------------------------
