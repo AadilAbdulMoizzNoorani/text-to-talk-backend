@@ -1,190 +1,103 @@
-import google.generativeai as genai
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from flask_jwt_extended import JWTManager, jwt_required, get_jwt_identity
 from flask_bcrypt import Bcrypt
-from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
-from pymongo import MongoClient
-from bson.objectid import ObjectId
-from gridfs import GridFS
-import datetime
 from dotenv import load_dotenv
 import os
-from flask import jsonify
-import requests
-import time
 
-from auth import check_login
-
-bcrypt = Bcrypt()
+# Load env
 load_dotenv()
 
-# -----------------------------
-# MongoDB + GridFS Setup
-# -----------------------------
-client = MongoClient(os.getenv('MONGO_DB'))
-db = client[os.getenv('DB_NAME')]
-history = db["history"]
-fs = GridFS(db)  # GridFS object
+# Custom imports
+from auth import register_user, login_user, get_profile, edit_profile, logout_user, bcrypt
+from ai_service import api, get_history, delete_single_history, delete_multiple_history, delete_all_history
 
-# -----------------------------
-# Gemini AI Setup
-# -----------------------------
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+app = Flask(__name__)
+CORS(app)  # Sab origins allow
 
-# -----------------------------
-# AssemblyAI API Key
-# -----------------------------
-ASSEMBLY_API_KEY = os.getenv("ASSEMBLY_API_KEY") or "3674a77753904f9f91f05d1fc731aa55"
+# JWT secret key (production me env variable use karo)
+app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY", "super-secret-key")
 
-# -----------------------------
-# SAVE HISTORY
-# -----------------------------
-def save_history(res):
-    login_status = check_login()
-    title_prompt = f"""
-        Read the following summary and generate a short professional title (max 10 words).
-        It should look like a meeting note headline.
+# Init JWT + Bcrypt
+jwt = JWTManager(app)
+bcrypt.init_app(app)
 
-        Summary:
-        {res}
-    """
-    model = genai.GenerativeModel(os.getenv("GEMINI_MODEL"))
-    title_res = model.generate_content(
-        [title_prompt],
-        generation_config=genai.types.GenerationConfig(
-            temperature=0.5,
-            max_output_tokens=5000,
-        )
-    )
-    title_text = title_res.text.strip()
-    user_data = login_status.get_json()
+@app.route("/")
+def home():
+    return "Hello, API is running!"
 
-    if user_data.get("logged_in"):
-        user_id = user_data.get("user_id")
-        history.insert_one({
-            "user_id": user_id,
-            "title": title_text,
-            "history": res.text,
-            "created_at": datetime.datetime.utcnow()
-        })
-        return {"message": "history saved", "title": title_text, "resp": res.text}
-    else:
-        return {"response": res.text}
-
-# -----------------------------
-# API FUNCTION (AssemblyAI + Gemini)
-# -----------------------------
-def api(file_ref):
-    """
-    file_ref: str (local path) ya dict (MongoDB GridFS)
-    """
-    # 1️⃣ Read audio bytes
-    if isinstance(file_ref, dict):
-        # GridFS se audio read karo
-        file_id = ObjectId(file_ref["file_id"])
-        audio_bytes = fs.get(file_id).read()
-    else:
-        # Local file path
-        with open(file_ref, "rb") as f:
-            audio_bytes = f.read()
-
-    # 2️⃣ Upload to AssemblyAI
-    headers = {"authorization": ASSEMBLY_API_KEY}
-    upload_res = requests.post(
-        "https://api.assemblyai.com/v2/upload",
-        headers=headers,
-        data=audio_bytes
-    )
-    upload_res.raise_for_status()
-    audio_url = upload_res.json()["upload_url"]
-
-    # 3️⃣ Start transcription
-    transcript_req = {"audio_url": audio_url}
-    transcript_res = requests.post(
-        "https://api.assemblyai.com/v2/transcript",
-        json=transcript_req,
-        headers=headers
-    )
-    transcript_res.raise_for_status()
-    transcript_id = transcript_res.json()["id"]
-
-    # 4️⃣ Poll for transcription result
-    transcript_text = None
-    while True:
-        poll_res = requests.get(
-            f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
-            headers=headers
-        )
-        poll_res.raise_for_status()
-        status = poll_res.json()["status"]
-        if status == "completed":
-            transcript_text = poll_res.json()["text"]
-            break
-        elif status == "error":
-            return {"error": "Transcription failed", "details": poll_res.json()}
-        time.sleep(3)
-
-    # 5️⃣ Send transcript to Gemini AI
-    model = genai.GenerativeModel(os.getenv("GEMINI_MODEL"))
-    prompt = f"""
-You are an expert AI assistant specialized in analyzing meeting recordings, audio discussions, and video content. 
-Your job is to take an audio/video transcript and provide a structured, clear, and professional response in ENGLISH ONLY. 
-Do NOT use any other language. 
-Always keep formatting consistent with headings and bullet points. 
-Follow the structure below strictly:
-
-====================================================================
-1. Abstract Summary
-2. Key Points
-3. Action Items
-4. Sentiment Analysis
-5. Proper Transcript
-
-TRANSCRIPT:
-
-"""
-
-    res = model.generate_content(
-        [prompt, f"This is transcript content: {transcript_text}"],
-        generation_config=genai.types.GenerationConfig(
-            temperature=1,
-        )
+# -------- Auth Routes --------
+@app.route("/auth/register", methods=["POST"])
+def register():
+    data = request.json
+    return register_user(
+        data["firstname"], 
+        data["lastname"], 
+        data["email"], 
+        data["password"]
     )
 
-    # 6️⃣ Save history
-    return save_history(res)
+@app.route("/auth/login", methods=["POST"])
+def login():
+    data = request.json
+    return login_user(data["email"], data["password"])
 
-# -----------------------------
-# HISTORY MANAGEMENT FUNCTIONS
-# -----------------------------
-def delete_single_history(history_id):
-    history_data = history.find_one({"_id": ObjectId(history_id)})
-    if history_data:
-        history.delete_one({"_id": ObjectId(history_id)})
-        return "history deleted"
-    else:
-        return {"id": history_id}
+@app.route("/auth/profile", methods=["GET"])
+@jwt_required()
+def profile():
+    user_id = get_jwt_identity()
+    return get_profile(user_id)
 
-def get_history(user_id):
-    history_Data = history.find({"user_id": user_id})
-    if history_Data:
-        record = []
-        for records in history_Data:
-            records["_id"] = str(records["_id"])
-            record.append(records)
-        return {"history_record": record}
-    else:
-        return "Sorry! No record Available"
+@app.route("/auth/profile", methods=["PUT"])
+@jwt_required()
+def update_profile():
+    user_id = get_jwt_identity()
+    data = request.json
+    return edit_profile(user_id, data)
 
-def delete_all_history(user_id):
-    result = history.delete_many({"user_id": user_id})
-    if result.deleted_count > 0:
-        return f"{result.deleted_count} history entries deleted"
-    else:
-        return "no history found of user"
+# -------- Chat Route (Serverless Friendly) --------
+@app.route("/chat/", methods=["POST"])
+def appi_post():
+    if "audio" not in request.files:
+        return jsonify({"error": "No audio file provided"}), 400
 
-def delete_multiple_history(history_ids):
-    obj_ids = [ObjectId(h_id) for h_id in history_ids]
-    result = history.delete_many({"_id": {"$in": obj_ids}})
-    if result.deleted_count > 0:
-        return f"{result.deleted_count} history entries deleted"
-    else:
-        return "no history found for the selected entries"
+    audio = request.files["audio"]
+
+    try:
+        # Pass audio bytes directly to API
+        result = api(audio.read())  
+        return jsonify({"response": result})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# -------- History Routes --------
+@app.route("/history", methods=['GET'])
+def history_route():
+    u_id = request.args.get("user_id")
+    return get_history(u_id)
+
+@app.route("/delete-history", methods=['DELETE'])
+def del_history_route():
+    h_id = request.args.get("history_id")
+    return delete_single_history(h_id)
+
+@app.route("/delete/all/history", methods=['DELETE'])
+def del_all_history_route():
+    user_id = request.args.get("user_id")
+    return delete_all_history(user_id)
+
+@app.route("/delete/select/history", methods=['POST'])
+def del_select_history_route():
+    data = request.get_json()
+    history_ids = data.get("history_ids", [])
+    if not history_ids:
+        return jsonify({"message": "no history IDs provided"}), 400
+    result = delete_multiple_history(history_ids)
+    return jsonify({"message": result})
+
+@app.route("/logout", methods=["POST"])
+@jwt_required()
+def logout_route():
+    return logout_user()
+
+# ---- Serverless compatible: no app.run() ----
