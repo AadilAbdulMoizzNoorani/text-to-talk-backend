@@ -3,6 +3,7 @@ from flask_bcrypt import Bcrypt
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 from pymongo import MongoClient
 from bson.objectid import ObjectId
+from gridfs import GridFS
 import datetime
 from dotenv import load_dotenv
 import os
@@ -11,17 +12,27 @@ import requests
 import time
 
 from auth import check_login
-bcrypt = Bcrypt()
 
+bcrypt = Bcrypt()
 load_dotenv()
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+# -----------------------------
+# MongoDB + GridFS Setup
+# -----------------------------
 client = MongoClient(os.getenv('MONGO_DB'))
-
 db = client[os.getenv('DB_NAME')]
 history = db["history"]
+fs = GridFS(db)  # GridFS object
 
-ASSEMBLY_API_KEY = "3674a77753904f9f91f05d1fc731aa55"  # AssemblyAI Key
+# -----------------------------
+# Gemini AI Setup
+# -----------------------------
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+# -----------------------------
+# AssemblyAI API Key
+# -----------------------------
+ASSEMBLY_API_KEY = os.getenv("ASSEMBLY_API_KEY") or "3674a77753904f9f91f05d1fc731aa55"
 
 # -----------------------------
 # SAVE HISTORY
@@ -34,9 +45,8 @@ def save_history(res):
 
         Summary:
         {res}
-        """
+    """
     model = genai.GenerativeModel(os.getenv("GEMINI_MODEL"))
-    
     title_res = model.generate_content(
         [title_prompt],
         generation_config=genai.types.GenerationConfig(
@@ -61,9 +71,6 @@ def save_history(res):
 
 # -----------------------------
 # API FUNCTION (AssemblyAI + Gemini)
-# -----------------------------
-# -----------------------------
-# API FUNCTION (AssemblyAI + Gemini) - GridFS compatible
 # -----------------------------
 def api(file_ref):
     """
@@ -115,53 +122,21 @@ def api(file_ref):
             return {"error": "Transcription failed", "details": poll_res.json()}
         time.sleep(3)
 
-    # 5️⃣ Send ONLY transcript text to Gemini
+    # 5️⃣ Send transcript to Gemini AI
     model = genai.GenerativeModel(os.getenv("GEMINI_MODEL"))
     prompt = f"""
 You are an expert AI assistant specialized in analyzing meeting recordings, audio discussions, and video content. 
 Your job is to take an audio/video transcript and provide a structured, clear, and professional response in ENGLISH ONLY. 
 Do NOT use any other language. 
 Always keep formatting consistent with headings and bullet points. 
-Follow the structure below very strictly:
+Follow the structure below strictly:
 
 ====================================================================
 1. Abstract Summary
-   - Provide a short overview (3–5 sentences) of the entire transcript.
-   - Keep it professional and concise.
-   - Avoid repetition. Focus on the purpose and main discussion.
-
 2. Key Points
-   - Extract the most important points from the transcript.
-   - Present them in clear bullet points.
-   - Each point should be precise, capturing essential details.
-   - Do not add unnecessary details, only the key information.
-   - Use numbered format (1, 2, 3, …).
-
 3. Action Items
-   - List clear, concise, and actionable tasks derived from the discussion.
-   - Use numbered format (1, 2, 3, …).
-   - Each action should be written as a direct instruction.
-   - Make sure action items are practical and easy to follow.
-
 4. Sentiment Analysis
-   - Identify the overall sentiment of the discussion: Positive, Neutral, or Negative.
-   - Briefly explain WHY you selected that sentiment (1–2 lines).
-   - Keep explanation factual and objective, not opinionated.
-
 5. Proper Transcript
-   - Provide the cleaned, readable version of the transcript.
-   - Remove filler words (uh, um, like, you know).
-   - Ensure proper grammar, punctuation, and readability.
-   - Keep original meaning intact, but make it professional.
-
-====================================================================
-Rules:
-- Response MUST always follow the above format.
-- Never skip a section, even if content is missing.
-- Always keep the output well-formatted with headings and spacing.
-- Output should look neat and professional, similar to a business meeting summary.
-- Always respond in ENGLISH ONLY. Never use any other language under any circumstances.
-
 
 TRANSCRIPT:
 
