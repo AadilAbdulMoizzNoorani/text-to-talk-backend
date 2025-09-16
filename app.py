@@ -11,7 +11,7 @@ from ai_service import api,get_history,delete_single_history,delete_multiple_his
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})  # sab origins allow
+CORS(app})  # sab origins allow
 
 # JWT secret key (production me env variable use karo)
 app.config["JWT_SECRET_KEY"] = "super-secret-key"
