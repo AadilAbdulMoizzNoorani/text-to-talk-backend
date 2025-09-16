@@ -3,7 +3,6 @@ from flask_bcrypt import Bcrypt
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 from pymongo import MongoClient
 from bson.objectid import ObjectId
-from gridfs import GridFS
 import datetime
 from dotenv import load_dotenv
 import os
@@ -12,27 +11,17 @@ import requests
 import time
 
 from auth import check_login
-
 bcrypt = Bcrypt()
+
 load_dotenv()
 
-# -----------------------------
-# MongoDB + GridFS Setup
-# -----------------------------
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 client = MongoClient(os.getenv('MONGO_DB'))
+
 db = client[os.getenv('DB_NAME')]
 history = db["history"]
-fs = GridFS(db)  # GridFS object
 
-# -----------------------------
-# Gemini AI Setup
-# -----------------------------
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-
-# -----------------------------
-# AssemblyAI API Key
-# -----------------------------
-ASSEMBLY_API_KEY = os.getenv("ASSEMBLY_API_KEY") or "3674a77753904f9f91f05d1fc731aa55"
+ASSEMBLY_API_KEY = "3674a77753904f9f91f05d1fc731aa55"  # AssemblyAI Key
 
 # -----------------------------
 # SAVE HISTORY
@@ -45,8 +34,9 @@ def save_history(res):
 
         Summary:
         {res}
-    """
+        """
     model = genai.GenerativeModel(os.getenv("GEMINI_MODEL"))
+    
     title_res = model.generate_content(
         [title_prompt],
         generation_config=genai.types.GenerationConfig(
@@ -72,31 +62,22 @@ def save_history(res):
 # -----------------------------
 # API FUNCTION (AssemblyAI + Gemini)
 # -----------------------------
-def api(file_ref):
-    """
-    file_ref: str (local path) ya dict (MongoDB GridFS)
-    """
-    # 1️⃣ Read audio bytes
-    if isinstance(file_ref, dict):
-        # GridFS se audio read karo
-        file_id = ObjectId(file_ref["file_id"])
-        audio_bytes = fs.get(file_id).read()
-    else:
-        # Local file path
-        with open(file_ref, "rb") as f:
-            audio_bytes = f.read()
+def api(file_path: str):
+    import math
 
-    # 2️⃣ Upload to AssemblyAI
+    # 1️⃣ Upload audio to AssemblyAI
     headers = {"authorization": ASSEMBLY_API_KEY}
-    upload_res = requests.post(
-        "https://api.assemblyai.com/v2/upload",
-        headers=headers,
-        data=audio_bytes
-    )
+
+    with open(file_path, "rb") as f:
+        upload_res = requests.post(
+            "https://api.assemblyai.com/v2/upload",
+            headers=headers,
+            data=f
+        )
     upload_res.raise_for_status()
     audio_url = upload_res.json()["upload_url"]
 
-    # 3️⃣ Start transcription
+    # 2️⃣ Start transcription
     transcript_req = {"audio_url": audio_url}
     transcript_res = requests.post(
         "https://api.assemblyai.com/v2/transcript",
@@ -106,7 +87,7 @@ def api(file_ref):
     transcript_res.raise_for_status()
     transcript_id = transcript_res.json()["id"]
 
-    # 4️⃣ Poll for transcription result
+    # 3️⃣ Poll for transcription result
     transcript_text = None
     while True:
         poll_res = requests.get(
@@ -122,39 +103,36 @@ def api(file_ref):
             return {"error": "Transcription failed", "details": poll_res.json()}
         time.sleep(3)
 
-    # 5️⃣ Send transcript to Gemini AI
+    # 4️⃣ Split transcript into chunks (e.g., 6000 characters per chunk)
+    def chunk_text(text, chunk_size=6000):
+        for i in range(0, len(text), chunk_size):
+            yield text[i:i+chunk_size]
+
     model = genai.GenerativeModel(os.getenv("GEMINI_MODEL"))
-    prompt = f"""
-You are an expert AI assistant specialized in analyzing meeting recordings, audio discussions, and video content. 
-Your job is to take an audio/video transcript and provide a structured, clear, and professional response in ENGLISH ONLY. 
-Do NOT use any other language. 
-Always keep formatting consistent with headings and bullet points. 
-Follow the structure below strictly:
 
-====================================================================
-1. Abstract Summary
-2. Key Points
-3. Action Items
-4. Sentiment Analysis
-5. Proper Transcript
-
-TRANSCRIPT:
-
+    prompt = """
+You are an expert AI assistant specialized in analyzing meeting recordings, audio discussions, and video content.
+Follow the structure below strictly (Abstract Summary, Key Points, Action Items, Sentiment Analysis, Proper Transcript).
+Always answer in ENGLISH ONLY.
 """
 
-    res = model.generate_content(
-        [prompt, f"This is transcript content: {transcript_text}"],
-        generation_config=genai.types.GenerationConfig(
-            temperature=1,
+    # 5️⃣ Process chunks one by one
+    final_response_parts = []
+    for i, chunk in enumerate(chunk_text(transcript_text)):
+        res = model.generate_content(
+            [prompt, f"PART {i+1}: {chunk}"],
+            generation_config=genai.types.GenerationConfig(
+                temperature=1,
+            )
         )
-    )
+        final_response_parts.append(res.text)
 
-    # 6️⃣ Save history
-    return save_history(res)
+    # 6️⃣ Combine all chunk results
+    combined_response = "\n\n".join(final_response_parts)
 
-# -----------------------------
-# HISTORY MANAGEMENT FUNCTIONS
-# -----------------------------
+    # 7️⃣ Save history / return combined result
+    return save_history(combined_response)
+
 def delete_single_history(history_id):
     history_data = history.find_one({"_id": ObjectId(history_id)})
     if history_data:
