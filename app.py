@@ -10,7 +10,7 @@ load_dotenv()
 
 # Custom imports
 from auth import register_user, login_user, get_profile, edit_profile, logout_user, bcrypt
-from ai_service import api, get_history, delete_single_history, delete_multiple_history, delete_all_history
+from ai_service import api,save_history,get_history, delete_single_history, delete_multiple_history, delete_all_history
 
 app = Flask(__name__)
 CORS(app)  # Sab origins allow
@@ -25,6 +25,12 @@ bcrypt.init_app(app)
 @app.route("/")
 def home():
     return "Hello, API is running!"
+    
+@app.route("/save-history",methods=['POST'])
+def store_history():
+    req_data = request.get_json()
+    message = req_data.get("req") or req_data.get("message")
+    return save_history(message)
 
 # -------- Auth Routes --------
 @app.route("/auth/register", methods=["POST"])
