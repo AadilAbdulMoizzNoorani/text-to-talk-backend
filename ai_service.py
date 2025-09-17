@@ -52,12 +52,12 @@ def save_history(res):
         history.insert_one({
             "user_id": user_id,
             "title": title_text,
-            "history": res.text,
+            "history": res,
             "created_at": datetime.datetime.utcnow()
         })
-        return {"message": "history saved", "title": title_text, "resp": res.text}
+        return {"message": "history saved", "title": title_text, "resp": res}
     else:
-        return {"response": res.text}
+        return {"response": res}
 
 # -----------------------------
 # API FUNCTION (AssemblyAI + Gemini)
